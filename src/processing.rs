@@ -18,6 +18,30 @@ pub const MAX_EDGE: u32 = 1920;
 /// JPEG quality used when re-encoding photos.
 pub const JPEG_QUALITY: u8 = 92;
 
+/// Why a user-entered folder name cannot be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderNameError {
+    Empty,
+    NotAllowed,
+    InvalidCharacters,
+    TrailingDotOrSpace,
+    TooLong,
+    Reserved,
+}
+
+/// Why an image could not be processed.
+#[derive(Debug, Clone)]
+pub enum ProcessError {
+    Open(String),
+    Read(String),
+    Unsupported,
+    Gif,
+    Decode(String),
+    Copy(String),
+    Encode(String),
+    Panic,
+}
+
 /// A successfully processed file.
 #[derive(Debug, Clone)]
 pub struct ProcessedImage {
@@ -133,27 +157,21 @@ pub fn process_image(
     output: &Path,
     max_edge: u32,
     jpeg_quality: u8,
-) -> Result<ProcessedImage, String> {
+) -> Result<ProcessedImage, ProcessError> {
     let reader = ImageReader::open(input)
-        .map_err(|error| format!("Could not open the file: {error}"))?
+        .map_err(|error| ProcessError::Open(error.to_string()))?
         .with_guessed_format()
-        .map_err(|error| format!("Could not read the file: {error}"))?;
+        .map_err(|error| ProcessError::Read(error.to_string()))?;
 
-    let source_format = reader
-        .format()
-        .ok_or_else(|| "Unsupported image format.".to_owned())?;
+    let source_format = reader.format().ok_or(ProcessError::Unsupported)?;
 
     if source_format == ImageFormat::Gif {
-        return Err(
-            "GIFs are not resized because doing so would drop their animation. \
-                    Export a PNG or JPEG first."
-                .to_owned(),
-        );
+        return Err(ProcessError::Gif);
     }
 
     let mut decoder = reader
         .into_decoder()
-        .map_err(|error| format!("Could not decode the image: {error}"))?;
+        .map_err(|error| ProcessError::Decode(error.to_string()))?;
 
     // Cameras store rotation in EXIF instead of rotating the pixels. Read the
     // orientation first so the dimensions we reason about match what a browser
@@ -174,8 +192,7 @@ pub fn process_image(
         // Nothing to resize: copying the original bytes avoids a generation of
         // JPEG loss and keeps the file size (and metadata) exactly as it was.
         drop(decoder);
-        fs::copy(input, output)
-            .map_err(|error| format!("Could not copy the image to the output folder: {error}"))?;
+        fs::copy(input, output).map_err(|error| ProcessError::Copy(error.to_string()))?;
 
         let output_bytes = fs::metadata(output)
             .map(|metadata| metadata.len())
@@ -191,7 +208,7 @@ pub fn process_image(
     }
 
     let mut image = DynamicImage::from_decoder(decoder)
-        .map_err(|error| format!("Could not decode the image: {error}"))?;
+        .map_err(|error| ProcessError::Decode(error.to_string()))?;
     image.apply_orientation(orientation);
 
     if (width, height) != (source_width, source_height) {
@@ -230,22 +247,22 @@ fn save_image(
     output: &Path,
     format: ImageFormat,
     jpeg_quality: u8,
-) -> Result<(), String> {
+) -> Result<(), ProcessError> {
     match format {
         ImageFormat::Jpeg => {
             // JPEG has no alpha channel; flatten to RGB before encoding.
             let rgb = image.to_rgb8();
-            let file = File::create(output)
-                .map_err(|error| format!("Could not create the output file: {error}"))?;
+            let file =
+                File::create(output).map_err(|error| ProcessError::Encode(error.to_string()))?;
             let mut encoder =
                 JpegEncoder::new_with_quality(BufWriter::new(file), jpeg_quality.clamp(1, 100));
             encoder
                 .encode_image(&rgb)
-                .map_err(|error| format!("Could not save the JPEG: {error}"))
+                .map_err(|error| ProcessError::Encode(error.to_string()))
         }
         _ => image
             .save_with_format(output, format)
-            .map_err(|error| format!("Could not save the image: {error}")),
+            .map_err(|error| ProcessError::Encode(error.to_string())),
     }
 }
 
@@ -285,15 +302,15 @@ pub fn unique_output_path(dir: &Path, file_name: &str, taken: &mut HashSet<Strin
 }
 
 /// Checks a user-entered folder name and returns it without surrounding space.
-pub fn validate_folder_name(name: &str) -> Result<String, String> {
+pub fn validate_folder_name(name: &str) -> Result<String, FolderNameError> {
     let name = name.trim();
 
     if name.is_empty() {
-        return Err("Enter a folder name.".to_owned());
+        return Err(FolderNameError::Empty);
     }
 
     if name == "." || name == ".." {
-        return Err("That name is not allowed.".to_owned());
+        return Err(FolderNameError::NotAllowed);
     }
 
     if name.chars().any(|character| {
@@ -303,15 +320,15 @@ pub fn validate_folder_name(name: &str) -> Result<String, String> {
                 '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
             )
     }) {
-        return Err(r#"Folder names cannot contain < > : " / \ | ? *"#.to_owned());
+        return Err(FolderNameError::InvalidCharacters);
     }
 
     if name.ends_with('.') || name.ends_with(' ') {
-        return Err("Folder names cannot end with a dot or a space.".to_owned());
+        return Err(FolderNameError::TrailingDotOrSpace);
     }
 
     if name.chars().count() > 120 {
-        return Err("Use a shorter folder name (120 characters or fewer).".to_owned());
+        return Err(FolderNameError::TooLong);
     }
 
     // CON, NUL, COM1, etc. are reserved on Windows even when an extension is
@@ -328,7 +345,7 @@ pub fn validate_folder_name(name: &str) -> Result<String, String> {
             .is_some_and(|number| (1..=9).contains(&number));
 
     if is_reserved {
-        return Err("That name is reserved by Windows. Pick another one.".to_owned());
+        return Err(FolderNameError::Reserved);
     }
 
     Ok(name.to_owned())

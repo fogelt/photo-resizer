@@ -1,17 +1,23 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 //! Photo Resizer — a small, fast batch image resizer for the web.
 //!
 //! Drop a batch of photos onto the window, choose a folder name, and get
 //! high-quality, web-friendly copies written next to the originals.
 
+mod i18n;
 mod processing;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use display_info::DisplayInfo;
+use i18n::Language;
 use iced::futures::channel::mpsc::unbounded;
+use iced::widget::image::Handle as ImageHandle;
 use iced::widget::{
     button, column, container, mouse_area, progress_bar, row, scrollable, text, text_input,
     tooltip, Space,
@@ -23,7 +29,7 @@ use iced::{
 use iced_font_awesome::fa_icon_solid;
 use processing::{
     collect_images, format_bytes, process_image, unique_output_path, validate_folder_name,
-    ProcessedImage, JPEG_QUALITY, MAX_EDGE,
+    FolderNameError, ProcessError, ProcessedImage, JPEG_QUALITY, MAX_EDGE,
 };
 
 // ---------------------------------------------------------------------------
@@ -44,6 +50,20 @@ const SUCCESS: Color = Color::from_rgb8(72, 209, 150);
 const WARNING: Color = Color::from_rgb8(255, 191, 92);
 const DANGER: Color = Color::from_rgb8(255, 112, 132);
 const DANGER_DIM: Color = Color::from_rgb8(55, 26, 37);
+
+const FLAG_EN: &[u8] = include_bytes!("../assets/flags/en.png");
+const FLAG_SV: &[u8] = include_bytes!("../assets/flags/sv.png");
+
+static FLAG_EN_HANDLE: LazyLock<ImageHandle> = LazyLock::new(|| flag_handle(FLAG_EN));
+static FLAG_SV_HANDLE: LazyLock<ImageHandle> = LazyLock::new(|| flag_handle(FLAG_SV));
+
+fn flag_handle(bytes: &[u8]) -> ImageHandle {
+    let image = image::load_from_memory(bytes)
+        .expect("bundled flag images must be valid PNGs")
+        .into_rgba8();
+    let (width, height) = (image.width(), image.height());
+    ImageHandle::from_rgba(width, height, image.into_raw())
+}
 
 // ---------------------------------------------------------------------------
 // Application state
@@ -118,12 +138,14 @@ fn window_icon() -> Option<window::Icon> {
 
 struct App {
     files: Vec<PhotoFile>,
+    language: Language,
     output_base: Option<PathBuf>,
     folder_name: String,
-    folder_error: Option<String>,
+    folder_error: Option<FolderNameError>,
     notice: Option<String>,
     hovered: bool,
     processing: bool,
+    spinner_frame: usize,
     completed: usize,
     failed: usize,
     batch_total: usize,
@@ -136,12 +158,14 @@ impl Default for App {
     fn default() -> Self {
         Self {
             files: Vec::new(),
+            language: Language::load(),
             output_base: None,
             folder_name: "web-ready".to_owned(),
             folder_error: None,
             notice: None,
             hovered: false,
             processing: false,
+            spinner_frame: 0,
             completed: 0,
             failed: 0,
             batch_total: 0,
@@ -161,7 +185,7 @@ enum FileStatus {
     Pending,
     Working,
     Done(ProcessedImage),
-    Failed(String),
+    Failed(ProcessError),
 }
 
 #[derive(Debug, Clone)]
@@ -171,9 +195,11 @@ enum Message {
     Browse,
     ChooseOutput,
     FolderNameChanged(String),
+    SetLanguage(Language),
     Start,
-    FileProcessed(usize, Result<ProcessedImage, String>),
+    FileProcessed(usize, Result<ProcessedImage, ProcessError>),
     Finished,
+    Tick,
     Clear,
     OpenOutput,
     DismissNotice,
@@ -212,18 +238,12 @@ impl App {
 
         if added == 0 {
             self.notice = Some(if self.files.is_empty() {
-                "No supported images were found. Try JPG, PNG, WebP, TIFF, BMP, or another raster format."
-                    .to_owned()
+                self.language.no_supported_images().to_owned()
             } else {
-                "Those files are already in the list.".to_owned()
+                self.language.already_in_list().to_owned()
             });
         } else if collected.skipped > 0 {
-            self.notice = Some(format!(
-                "Added {added} image{}. Skipped {} unsupported or unreadable item{}.",
-                plural(added),
-                collected.skipped,
-                plural(collected.skipped)
-            ));
+            self.notice = Some(self.language.added_skipped(added, collected.skipped));
         } else {
             self.notice = None;
         }
@@ -244,25 +264,25 @@ impl App {
         self.folder_error = None;
 
         let Some(base) = self.output_base.clone() else {
-            self.notice = Some("Choose where the new folder should be created first.".to_owned());
+            self.notice = Some(self.language.choose_location_first().to_owned());
             return Task::none();
         };
 
         let output_dir = base.join(folder_name);
 
         if output_dir.exists() && !output_dir.is_dir() {
-            self.notice = Some(format!(
-                "“{}” already exists as a file. Pick another folder name.",
-                output_dir.display()
-            ));
+            self.notice = Some(
+                self.language
+                    .folder_exists(&output_dir.display().to_string()),
+            );
             return Task::none();
         }
 
         if let Err(error) = std::fs::create_dir_all(&output_dir) {
-            self.notice = Some(format!(
-                "Could not create “{}”: {error}",
-                output_dir.display()
-            ));
+            self.notice = Some(
+                self.language
+                    .folder_create_failed(&output_dir.display().to_string(), &error.to_string()),
+            );
             return Task::none();
         }
 
@@ -310,9 +330,7 @@ impl App {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     process_image(&job.input, &job.output, MAX_EDGE, JPEG_QUALITY)
                 }))
-                .unwrap_or_else(|_| {
-                    Err("Unexpected error while processing this image.".to_owned())
-                });
+                .unwrap_or(Err(ProcessError::Panic));
 
                 let _ = sender.unbounded_send(Message::FileProcessed(job.index, result));
             });
@@ -335,7 +353,7 @@ impl App {
         for file in &mut self.files {
             if matches!(file.status, FileStatus::Working) {
                 self.failed += 1;
-                file.status = FileStatus::Failed("Processing stopped unexpectedly.".to_owned());
+                file.status = FileStatus::Failed(ProcessError::Panic);
             }
         }
 
@@ -374,9 +392,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::Browse => {
             let picked = rfd::FileDialog::new()
-                .set_title("Add photos")
+                .set_title(app.language.add_photos_title())
                 .add_filter(
-                    "Images",
+                    app.language.images_filter(),
                     &[
                         "jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp", "ico", "tga", "qoi",
                         "dds", "hdr", "ff", "pnm", "pbm", "pgm", "ppm", "pam", "gif",
@@ -391,8 +409,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ChooseOutput => {
-            let mut dialog =
-                rfd::FileDialog::new().set_title("Choose where to save the new folder");
+            let mut dialog = rfd::FileDialog::new().set_title(app.language.choose_output_title());
 
             if let Some(base) = &app.output_base {
                 dialog = dialog.set_directory(base);
@@ -408,6 +425,13 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::FolderNameChanged(name) => {
             app.folder_name = name;
             app.folder_error = None;
+            Task::none()
+        }
+        Message::SetLanguage(language) => {
+            if app.language != language {
+                app.language = language;
+                language.save();
+            }
             Task::none()
         }
         Message::Start => app.start(),
@@ -430,6 +454,12 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::Finished => {
             app.finish();
+            Task::none()
+        }
+        Message::Tick => {
+            if app.processing {
+                app.spinner_frame = (app.spinner_frame + 1) % SPINNER_FRAMES.len();
+            }
             Task::none()
         }
         Message::Clear => {
@@ -458,14 +488,36 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
     }
 }
 
-fn subscription(_app: &App) -> Subscription<Message> {
-    iced::event::listen_with(|event, _status, _window| match event {
+fn subscription(app: &App) -> Subscription<Message> {
+    let events = iced::event::listen_with(|event, _status, _window| match event {
         iced::Event::Window(window::Event::FileDropped(path)) => {
             Some(Message::FilesDropped(vec![path]))
         }
         iced::Event::Window(window::Event::FileHovered(_)) => Some(Message::HoverChanged(true)),
         iced::Event::Window(window::Event::FilesHoveredLeft) => Some(Message::HoverChanged(false)),
         _ => None,
+    });
+
+    if app.processing {
+        Subscription::batch([events, ticker()])
+    } else {
+        events
+    }
+}
+
+fn ticker() -> Subscription<Message> {
+    Subscription::run(|| {
+        let (sender, receiver) = unbounded();
+
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(100));
+
+            if sender.unbounded_send(Message::Tick).is_err() {
+                break;
+            }
+        });
+
+        receiver
     })
 }
 
@@ -485,13 +537,13 @@ fn reveal_in_file_manager(path: &Path) {
 // ---------------------------------------------------------------------------
 
 fn view(app: &App) -> Element<'_, Message> {
-    let mut content = column![header()]
+    let mut content = column![header(app)]
         .spacing(16)
         .width(Length::Fill)
         .height(Length::Fill);
 
     if let Some(notice) = &app.notice {
-        content = content.push(notice_view(notice));
+        content = content.push(notice_view(app.language, notice));
     }
 
     content = content.push(drop_zone(app));
@@ -537,50 +589,91 @@ fn icon_button(
     .into()
 }
 
-fn status_icon(status: &FileStatus) -> Element<'_, Message> {
-    let (name, color) = match status {
-        FileStatus::Pending => ("clock", MUTED),
-        FileStatus::Working => ("spinner", WARNING),
-        FileStatus::Done(_) => ("circle-check", SUCCESS),
-        FileStatus::Failed(_) => ("circle-xmark", DANGER),
-    };
+const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
-    icon(name, 14.0, color)
+fn spinning(frame: usize, diameter: f32, color: Color) -> Element<'static, Message> {
+    container(
+        text(SPINNER_FRAMES[frame % SPINNER_FRAMES.len()])
+            .size(diameter)
+            .color(color),
+    )
+    .width(Length::Fixed(diameter))
+    .height(Length::Fixed(diameter))
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .into()
 }
 
-fn header() -> Element<'static, Message> {
+fn status_icon(status: &FileStatus, spinner_frame: usize) -> Element<'_, Message> {
+    match status {
+        FileStatus::Pending => icon("clock", 14.0, MUTED),
+        FileStatus::Working => spinning(spinner_frame, 18.0, WARNING),
+        FileStatus::Done(_) => icon("circle-check", 14.0, SUCCESS),
+        FileStatus::Failed(_) => icon("circle-xmark", 14.0, DANGER),
+    }
+}
+
+fn flag_icon(handle: &'static LazyLock<ImageHandle>) -> Element<'static, Message> {
+    iced::widget::image((**handle).clone())
+        .width(Length::Fixed(24.0))
+        .height(Length::Fixed(16.0))
+        .into()
+}
+
+fn flag_button(
+    language: Language,
+    selected: bool,
+    handle: &'static LazyLock<ImageHandle>,
+    hint: &'static str,
+) -> Element<'static, Message> {
+    tooltip(
+        button(flag_icon(handle))
+            .on_press(Message::SetLanguage(language))
+            .padding(4)
+            .style(flag_button_style(selected)),
+        container(text(hint).size(11).color(TEXT))
+            .padding([5, 8])
+            .style(tooltip_style),
+        tooltip::Position::Bottom,
+    )
+    .gap(6)
+    .into()
+}
+
+fn header(app: &App) -> Element<'_, Message> {
+    let language = app.language;
+
     row![
         column![
-            text("Photo Resizer").size(30).color(TEXT),
-            text("Drop a batch. Pick a folder name. Get web-ready copies.")
-                .size(13)
-                .color(MUTED),
+            text(language.title()).size(30).color(TEXT),
+            text(language.subtitle()).size(13).color(MUTED),
         ]
         .spacing(3),
         Space::new().width(Length::Fill),
-        container(
-            row![
-                icon("sliders", 11.0, MUTED),
-                text(format!("{MAX_EDGE} px max · JPEG {JPEG_QUALITY}"))
-                    .size(11)
-                    .color(MUTED),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center)
-        )
-        .padding([6, 10])
-        .style(chip_style),
+        flag_button(
+            Language::English,
+            language == Language::English,
+            &FLAG_EN_HANDLE,
+            language.english(),
+        ),
+        flag_button(
+            Language::Swedish,
+            language == Language::Swedish,
+            &FLAG_SV_HANDLE,
+            language.swedish(),
+        ),
     ]
+    .spacing(8)
     .align_y(Alignment::Center)
     .width(Length::Fill)
     .into()
 }
 
-fn notice_view(notice: &str) -> Element<'_, Message> {
+fn notice_view(language: Language, notice: &str) -> Element<'_, Message> {
     container(
         row![
             text(notice).size(13).color(TEXT).width(Length::Fill),
-            icon_button("xmark", "Dismiss", Message::DismissNotice),
+            icon_button("xmark", language.dismiss(), Message::DismissNotice),
         ]
         .spacing(12)
         .align_y(Alignment::Center)
@@ -593,18 +686,20 @@ fn notice_view(notice: &str) -> Element<'_, Message> {
 }
 
 fn drop_zone(app: &App) -> Element<'_, Message> {
+    let language = app.language;
+
     let heading = if app.hovered {
-        "Let go to add these photos"
+        language.drop_hover()
     } else if app.files.is_empty() {
-        "Drop your photos here"
+        language.drop_idle()
     } else {
-        "Drop more photos"
+        language.drop_more()
     };
 
     let subtitle = if app.files.is_empty() {
-        "Drag in a batch of images or click to browse · JPG, PNG, WebP, TIFF, BMP and more"
+        language.drop_hint_empty()
     } else {
-        "Drag files or folders in at any time · click to browse"
+        language.drop_hint_more()
     };
 
     let content = column![
@@ -642,18 +737,18 @@ fn file_list(app: &App) -> Element<'_, Message> {
         .count();
 
     let summary = if app.processing {
-        format!("{} of {} finished", app.completed, app.batch_total)
+        app.language.finished_count(app.completed, app.batch_total)
     } else if failed > 0 {
-        format!("{done} ready · {failed} failed")
+        app.language.ready_failed(done, failed)
     } else if done > 0 {
-        format!("{done} ready")
+        app.language.ready(done)
     } else {
-        format!("{} images", app.files.len())
+        app.language.images_count(app.files.len())
     };
 
     let mut header = row![
         icon("images", 14.0, MUTED),
-        text("Batch").size(15).color(TEXT),
+        text(app.language.batch()).size(15).color(TEXT),
         text(summary).size(12).color(MUTED),
         Space::new().width(Length::Fill),
     ]
@@ -662,10 +757,17 @@ fn file_list(app: &App) -> Element<'_, Message> {
     .width(Length::Fill);
 
     if !app.processing {
-        header = header.push(icon_button("trash", "Clear batch", Message::Clear));
+        header = header.push(icon_button(
+            "trash",
+            app.language.clear_batch(),
+            Message::Clear,
+        ));
     }
 
-    let rows = app.files.iter().map(file_row);
+    let rows = app
+        .files
+        .iter()
+        .map(|file| file_row(app.language, app.spinner_frame, file));
     let list = scrollable(column(rows).spacing(6).width(Length::Fill))
         .height(Length::Fill)
         .width(Length::Fill);
@@ -678,7 +780,7 @@ fn file_list(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-fn file_row(file: &PhotoFile) -> Element<'_, Message> {
+fn file_row(language: Language, spinner_frame: usize, file: &PhotoFile) -> Element<'_, Message> {
     let name = file
         .path
         .file_name()
@@ -690,11 +792,11 @@ fn file_row(file: &PhotoFile) -> Element<'_, Message> {
             file.path
                 .parent()
                 .and_then(Path::file_name)
-                .map(|parent| format!("{} · waiting", parent.to_string_lossy()))
-                .unwrap_or_else(|| "Waiting".to_owned()),
+                .map(|parent| language.waiting_in(&parent.to_string_lossy()))
+                .unwrap_or_else(|| language.waiting().to_owned()),
             MUTED,
         ),
-        FileStatus::Working => ("Resizing with Lanczos3…".to_owned(), WARNING),
+        FileStatus::Working => (language.working().to_owned(), WARNING),
         FileStatus::Done(processed) => (
             format!(
                 "{} × {} → {} × {} · {}",
@@ -706,7 +808,7 @@ fn file_row(file: &PhotoFile) -> Element<'_, Message> {
             ),
             SUCCESS,
         ),
-        FileStatus::Failed(error) => (error.clone(), DANGER),
+        FileStatus::Failed(error) => (language.process_error(error), DANGER),
     };
 
     container(
@@ -717,7 +819,7 @@ fn file_row(file: &PhotoFile) -> Element<'_, Message> {
             ]
             .spacing(2)
             .width(Length::Fill),
-            status_icon(&file.status),
+            status_icon(&file.status, spinner_frame),
         ]
         .spacing(12)
         .align_y(Alignment::Center)
@@ -747,13 +849,10 @@ fn progress_view(app: &App) -> Element<'_, Message> {
             )
             .push(
                 row![
-                    icon("spinner", 12.0, MUTED),
-                    text(format!(
-                        "Resizing {} of {} images…",
-                        app.completed, app.batch_total
-                    ))
-                    .size(12)
-                    .color(MUTED),
+                    spinning(app.spinner_frame, 15.0, MUTED),
+                    text(app.language.progress(app.completed, app.batch_total))
+                        .size(12)
+                        .color(MUTED),
                     Space::new().width(Length::Fill),
                     text(format!("{}%", (fraction * 100.0).round() as u32))
                         .size(12)
@@ -777,12 +876,10 @@ fn progress_view(app: &App) -> Element<'_, Message> {
                 13.0,
                 summary_color
             ),
-            text(format!(
-                "Finished {} image{} in {:.1}s",
-                app.batch_total,
-                plural(app.batch_total),
-                elapsed.as_secs_f32()
-            ))
+            text(
+                app.language
+                    .finished(app.batch_total, elapsed.as_secs_f32())
+            )
             .size(12)
             .color(summary_color),
             Space::new().width(Length::Fill),
@@ -792,7 +889,11 @@ fn progress_view(app: &App) -> Element<'_, Message> {
         .width(Length::Fill);
 
         if failed > 0 {
-            summary = summary.push(text(format!("{failed} failed")).size(12).color(DANGER));
+            summary = summary.push(
+                text(app.language.failed_count(failed))
+                    .size(12)
+                    .color(DANGER),
+            );
             summary = summary.push(Space::new().width(10));
         }
 
@@ -800,7 +901,7 @@ fn progress_view(app: &App) -> Element<'_, Message> {
             button(
                 row![
                     icon("folder-open", 12.0, TEXT),
-                    text("Open folder").size(12),
+                    text(app.language.open_folder()).size(12),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -817,33 +918,31 @@ fn progress_view(app: &App) -> Element<'_, Message> {
 }
 
 fn controls(app: &App) -> Element<'_, Message> {
+    let language = app.language;
+
     let location = match (&app.output_base, validate_folder_name(&app.folder_name)) {
         (Some(base), Ok(folder)) => base.join(folder).display().to_string(),
         (Some(base), Err(_)) => base.display().to_string(),
-        (None, _) => "No location selected yet".to_owned(),
+        (None, _) => language.no_location().to_owned(),
     };
 
     let can_start = !app.processing && !app.files.is_empty();
     let start_label = if app.processing {
-        "Resizing…".to_owned()
+        language.resizing().to_owned()
     } else if app.files.is_empty() {
-        "Resize images".to_owned()
+        language.resize_images().to_owned()
     } else {
-        format!(
-            "Resize {} image{}",
-            app.files.len(),
-            plural(app.files.len())
-        )
-    };
-    let start_icon = if app.processing {
-        "spinner"
-    } else {
-        "wand-magic-sparkles"
+        language.resize_n(app.files.len())
     };
     let start_icon_color = if can_start { Color::WHITE } else { MUTED };
+    let start_glyph = if app.processing {
+        spinning(app.spinner_frame, 16.0, start_icon_color)
+    } else {
+        icon("wand-magic-sparkles", 14.0, start_icon_color)
+    };
 
     let folder_row = row![
-        text_input("Folder name", &app.folder_name)
+        text_input(language.folder_placeholder(), &app.folder_name)
             .on_input(Message::FolderNameChanged)
             .on_submit(Message::Start)
             .padding([10, 12])
@@ -851,12 +950,9 @@ fn controls(app: &App) -> Element<'_, Message> {
             .style(text_input_style)
             .width(Length::Fill),
         button(
-            row![
-                icon(start_icon, 14.0, start_icon_color),
-                text(start_label).size(14),
-            ]
-            .spacing(7)
-            .align_y(Alignment::Center),
+            row![start_glyph, text(start_label).size(14),]
+                .spacing(7)
+                .align_y(Alignment::Center),
         )
         .padding([11, 22])
         .style(primary_button)
@@ -871,7 +967,7 @@ fn controls(app: &App) -> Element<'_, Message> {
             column![
                 row![
                     icon("folder", 11.0, MUTED),
-                    text("New folder").size(11).color(MUTED),
+                    text(language.new_folder()).size(11).color(MUTED),
                 ]
                 .spacing(5)
                 .align_y(Alignment::Center),
@@ -879,7 +975,11 @@ fn controls(app: &App) -> Element<'_, Message> {
             ]
             .spacing(2)
             .width(Length::Fill),
-            icon_button("folder-open", "Choose output folder", Message::ChooseOutput),
+            icon_button(
+                "folder-open",
+                language.choose_folder(),
+                Message::ChooseOutput,
+            ),
         ]
         .spacing(12)
         .align_y(Alignment::Center)
@@ -889,8 +989,8 @@ fn controls(app: &App) -> Element<'_, Message> {
     .spacing(12)
     .width(Length::Fill);
 
-    if let Some(error) = &app.folder_error {
-        form = form.push(text(error).size(12).color(DANGER));
+    if let Some(error) = app.folder_error {
+        form = form.push(text(language.folder_error(error)).size(12).color(DANGER));
     }
 
     container(form)
@@ -1026,18 +1126,6 @@ fn file_row_style(_theme: &Theme) -> container::Style {
     }
 }
 
-fn chip_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(SURFACE.into()),
-        border: Border {
-            color: BORDER,
-            width: 1.0,
-            radius: 9.0.into(),
-        },
-        ..container::Style::default()
-    }
-}
-
 fn banner_style(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(DANGER_DIM.into()),
@@ -1062,10 +1150,26 @@ fn tooltip_style(_theme: &Theme) -> container::Style {
     }
 }
 
-fn plural(count: usize) -> &'static str {
-    if count == 1 {
-        ""
-    } else {
-        "s"
+fn flag_button_style(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let background = if selected {
+            SURFACE_HOVER
+        } else {
+            match status {
+                button::Status::Hovered | button::Status::Pressed => SURFACE_HOVER,
+                _ => SURFACE,
+            }
+        };
+
+        button::Style {
+            background: Some(background.into()),
+            text_color: TEXT,
+            border: Border {
+                color: if selected { ACCENT } else { BORDER },
+                width: if selected { 2.0 } else { 1.0 },
+                radius: 7.0.into(),
+            },
+            ..button::Style::default()
+        }
     }
 }

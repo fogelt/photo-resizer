@@ -22,7 +22,8 @@ Grab the latest installer for your platform from the
    **Resize N images** (or Enter).
 4. Press **Open folder** when it finishes.
 
-You can keep adding files while the app is open.
+You can keep adding files while the app is open. Use the flags in the top-right
+to switch between English and Svenska; the choice is remembered.
 
 ## What it does
 

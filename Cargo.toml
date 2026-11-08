@@ -1,6 +1,6 @@
 [package]
 name = "photo-resizer"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.88"
 description = "A fast, lightweight batch image resizer for the web"
@@ -10,6 +10,7 @@ license = "MIT"
 display-info = "0.5"
 iced = { version = "0.14", default-features = false, features = [
     "crisp",
+    "image-without-codecs",
     "thread-pool",
     "tiny-skia",
     "wayland",
@@ -51,7 +52,7 @@ strip = true
 [package.metadata.packager]
 product_name = "Photo Resizer"
 identifier = "com.fogelt.photoresizer"
-version = "0.1.1"
+version = "0.1.2"
 description = "Batch resize photos to web-friendly dimensions."
 authors = ["fogelt"]
 publisher = "fogelt"
@@ -71,3 +72,4 @@ minimum_system_version = "11.0"
 priority = "optional"
 section = "graphics"
 depends = ["libc6", "libfontconfig1", "libwayland-client0", "libxkbcommon0"]
+
