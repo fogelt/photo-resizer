@@ -41,7 +41,8 @@ window that uses monitorsize to open a appropriate size window where users can d
 **Release workflow:**
 - Provide a GitHub Actions workflow (`.github/workflows/release.yml`) that runs on `v*` tags.
 - Build and test on Linux, macOS (Intel and Apple Silicon), and Windows.
-- Publish a GitHub Release containing a runnable archive for each platform.
+- Publish a GitHub Release containing native installers, not zip archives:
+  Windows `.exe` (NSIS), macOS `.dmg`, Linux `.deb` and `.AppImage`.
 
 **App icon:**
 - Provide a Python script (`tools/make_icon.py`) that draws the app icon from scratch and exports PNG sizes plus a Windows `.ico`.

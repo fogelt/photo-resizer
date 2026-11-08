@@ -5,14 +5,12 @@ losing quality. Drop in 50+ images, choose a folder name, and go.
 
 ## Download
 
-Grab the latest release for your platform from the
+Grab the latest installer for your platform from the
 [Releases page](https://github.com/fogelt/photo-resizer/releases):
 
-- Windows (x86_64)
-- macOS (Intel and Apple Silicon)
-- Linux (x86_64)
-
-Extract the archive and run `photo-resizer` (or `photo-resizer.exe` on Windows).
+- **Windows** — `.exe` installer
+- **macOS** — `.dmg` (drag the app into Applications)
+- **Linux** — `.deb` package or `.AppImage`
 
 ## Use
 
