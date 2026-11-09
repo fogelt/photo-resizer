@@ -1,6 +1,6 @@
 [package]
 name = "photo-resizer"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.88"
 description = "A fast, lightweight batch image resizer for the web"
@@ -53,7 +53,7 @@ lto = "thin"
 [package.metadata.packager]
 product_name = "Photo Resizer"
 identifier = "com.fogelt.photoresizer"
-version = "0.1.4"
+version = "0.1.5"
 description = "Batch resize photos to web-friendly dimensions."
 authors = ["fogelt"]
 publisher = "fogelt"

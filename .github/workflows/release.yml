@@ -25,9 +25,11 @@ jobs:
           - name: macos-arm64
             os: macos-15
             formats: dmg
+            dmg_arch: aarch64
           - name: macos-x64
             os: macos-15-intel
             formats: dmg
+            dmg_arch: x64
     steps:
       - uses: actions/checkout@v4
 
@@ -53,29 +55,36 @@ jobs:
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked
 
-      - name: Build installers (macOS)
+      - name: Build macOS app bundle
         if: runner.os == 'macOS'
         shell: bash
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
+        run: cargo packager --release --formats app --out-dir dist
+
+      - name: Sign and verify macOS app bundle
+        if: runner.os == 'macOS'
+        shell: bash
         run: |
-          # Re-sign the binary ad-hoc after the build. The packager's build
-          # command is a no-op here, so the signed binary is what gets copied
-          # into the app bundle.
-          cargo build --release --locked
-          codesign --force --sign - target/release/photo-resizer
-          for attempt in 1 2 3; do
-            echo "Packaging attempt $attempt..."
-            if cargo packager --release --formats "${{ matrix.formats }}" --out-dir dist; then
-              exit 0
-            fi
-            echo "Packaging failed; cleaning up the mounted image and retrying..."
-            hdiutil detach "/Volumes/Photo Resizer" -force || true
-            rm -rf dist
-            sleep 5
-          done
-          echo "Packaging failed after 3 attempts." >&2
-          exit 1
+          # Ad-hoc sign the complete app bundle. Signing the bundle (rather than
+          # just the executable) keeps macOS from reporting the app as damaged.
+          xattr -cr "dist/Photo Resizer.app"
+          codesign --force --deep --sign - "dist/Photo Resizer.app"
+          codesign --verify --deep --strict --verbose=2 "dist/Photo Resizer.app"
+
+      - name: Create macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          STAGE=dist/dmg-stage
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          cp -R "dist/Photo Resizer.app" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "Photo Resizer" -srcfolder "$STAGE" -ov -format UDZO \
+            "dist/Photo.Resizer_${VERSION}_${{ matrix.dmg_arch }}.dmg"
+          rm -rf "$STAGE"
 
       - name: Build installers
         if: runner.os != 'macOS'
@@ -83,21 +92,6 @@ jobs:
           # linuxdeploy is itself an AppImage; run it without FUSE on runners.
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: cargo packager --release --formats ${{ matrix.formats }} --out-dir dist
-
-      - name: Verify macOS executable signature
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          # A stripped binary can keep a stale ad-hoc signature, which macOS
-          # reports as a damaged app. Fail the release if that ever happens.
-          DMG=$(ls dist/*.dmg | head -n 1)
-          MOUNT=/tmp/photo-resizer-dmg
-          mkdir -p "$MOUNT"
-          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT"
-          trap 'hdiutil detach "$MOUNT" -force || true' EXIT
-          APP=$(find "$MOUNT" -maxdepth 1 -name "*.app" | head -n 1)
-          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Contents/Info.plist")
-          codesign --verify --strict --verbose=2 "$APP/Contents/MacOS/$EXEC"
 
       - uses: actions/upload-artifact@v4
         with:
