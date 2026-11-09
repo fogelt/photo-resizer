@@ -15,7 +15,7 @@ use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 /// The longest edge of every resized image, in pixels.
 pub const MAX_EDGE: u32 = 1920;
 
-/// JPEG quality used when re-encoding photos.
+/// Default JPEG quality used when re-encoding photos.
 pub const JPEG_QUALITY: u8 = 92;
 
 /// Why a user-entered folder name cannot be used.
@@ -49,6 +49,7 @@ pub struct ProcessedImage {
     pub source_height: u32,
     pub width: u32,
     pub height: u32,
+    pub source_bytes: u64,
     pub output_bytes: u64,
 }
 
@@ -164,6 +165,9 @@ pub fn process_image(
         .map_err(|error| ProcessError::Read(error.to_string()))?;
 
     let source_format = reader.format().ok_or(ProcessError::Unsupported)?;
+    let source_bytes = fs::metadata(input)
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
 
     if source_format == ImageFormat::Gif {
         return Err(ProcessError::Gif);
@@ -188,7 +192,12 @@ pub fn process_image(
     let (width, height) = fit_within(source_width, source_height, max_edge);
     let output_format = ImageFormat::from_path(output).unwrap_or(source_format);
 
-    if (width, height) == (source_width, source_height) && output_format == source_format {
+    let quality_differs = output_format == ImageFormat::Jpeg && jpeg_quality != JPEG_QUALITY;
+
+    if (width, height) == (source_width, source_height)
+        && output_format == source_format
+        && !quality_differs
+    {
         // Nothing to resize: copying the original bytes avoids a generation of
         // JPEG loss and keeps the file size (and metadata) exactly as it was.
         drop(decoder);
@@ -203,6 +212,7 @@ pub fn process_image(
             source_height,
             width,
             height,
+            source_bytes,
             output_bytes,
         });
     }
@@ -226,6 +236,7 @@ pub fn process_image(
         source_height,
         width,
         height,
+        source_bytes,
         output_bytes,
     })
 }

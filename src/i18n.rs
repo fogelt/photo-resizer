@@ -1,9 +1,9 @@
-//! Translation strings and the persisted language preference.
+//! Translation strings and the small set of persisted user preferences.
 
 use std::fs;
 use std::path::PathBuf;
 
-use crate::processing::{FolderNameError, ProcessError};
+use crate::processing::{FolderNameError, ProcessError, JPEG_QUALITY};
 
 const CONFIG_DIR: &str = "photo-resizer";
 const CONFIG_FILE: &str = "settings.conf";
@@ -48,15 +48,7 @@ impl Language {
     }
 
     pub fn save(self) {
-        let Some(path) = config_path() else {
-            return;
-        };
-
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-
-        let _ = fs::write(path, format!("language={}\n", self.code()));
+        write_setting("language", self.code());
     }
 
     pub fn title(self) -> &'static str {
@@ -186,6 +178,20 @@ impl Language {
         match self {
             Self::English => "Folder name",
             Self::Swedish => "Mappnamn",
+        }
+    }
+
+    pub fn quality(self) -> &'static str {
+        match self {
+            Self::English => "JPEG quality",
+            Self::Swedish => "JPEG-kvalitet",
+        }
+    }
+
+    pub fn reset_quality(self) -> &'static str {
+        match self {
+            Self::English => "Reset quality",
+            Self::Swedish => "Återställ kvaliteten",
         }
     }
 
@@ -396,6 +402,66 @@ impl Language {
             },
         }
     }
+}
+
+/// Loads the remembered JPEG quality, falling back to the default.
+pub fn load_quality() -> u8 {
+    let Some(path) = config_path() else {
+        return JPEG_QUALITY;
+    };
+
+    let Ok(contents) = fs::read_to_string(path) else {
+        return JPEG_QUALITY;
+    };
+
+    contents
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("quality="))
+        .find_map(|value| value.trim().parse::<u8>().ok())
+        .map(|quality| quality.clamp(1, 100))
+        .unwrap_or(JPEG_QUALITY)
+}
+
+/// Remembers the chosen JPEG quality without disturbing other settings.
+pub fn save_quality(quality: u8) {
+    write_setting("quality", &quality.clamp(1, 100).to_string());
+}
+
+fn write_setting(key: &str, value: &str) {
+    let Some(path) = config_path() else {
+        return;
+    };
+
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let mut lines: Vec<String> = fs::read_to_string(&path)
+        .map(|contents| contents.lines().map(str::to_owned).collect())
+        .unwrap_or_default();
+
+    let prefix = format!("{key}=");
+    let mut replaced = false;
+    lines.retain_mut(|line| {
+        if line.trim_start().starts_with(&prefix) {
+            if replaced {
+                return false;
+            }
+
+            *line = format!("{key}={value}");
+            replaced = true;
+        }
+
+        true
+    });
+
+    if !replaced {
+        lines.push(format!("{key}={value}"));
+    }
+
+    let mut contents = lines.join("\n");
+    contents.push('\n');
+    let _ = fs::write(path, contents);
 }
 
 fn plural_en(count: usize) -> &'static str {

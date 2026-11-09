@@ -23,15 +23,18 @@ Grab the latest installer for your platform from the
 4. Press **Open folder** when it finishes.
 
 You can keep adding files while the app is open. Use the flags in the top-right
-to switch between English and Svenska; the choice is remembered.
+to switch between English and Svenska; the choice is remembered. The JPEG
+quality slider is remembered too, and the reset button next to it restores the
+default of 92.
 
 ## What it does
 
 - Caps the longest edge at **1920 px** and never enlarges images.
 - Keeps the original format and uses high-quality Lanczos3 resizing.
-- Re-encodes JPEGs at quality 92.
+- Re-encodes JPEGs at the quality you choose (default 92).
 - Fixes phone photos that are rotated with EXIF orientation.
-- Copies images that already fit byte-for-byte, so they stay untouched.
+- Copies images that already fit byte-for-byte, so they stay untouched (unless
+  you changed the JPEG quality).
 - Creates a new folder with your chosen name and never overwrites existing
   files (duplicates get ` (2)`, ` (3)`, and so on).
 - Processes images in parallel and reports progress, skipped files, and errors

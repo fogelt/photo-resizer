@@ -15,11 +15,11 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use display_info::DisplayInfo;
-use i18n::Language;
+use i18n::{load_quality, save_quality, Language};
 use iced::futures::channel::mpsc::unbounded;
 use iced::widget::image::Handle as ImageHandle;
 use iced::widget::{
-    button, column, container, mouse_area, progress_bar, row, scrollable, text, text_input,
+    button, column, container, mouse_area, progress_bar, row, scrollable, slider, text, text_input,
     tooltip, Space,
 };
 use iced::{
@@ -139,6 +139,7 @@ fn window_icon() -> Option<window::Icon> {
 struct App {
     files: Vec<PhotoFile>,
     language: Language,
+    quality: u8,
     output_base: Option<PathBuf>,
     folder_name: String,
     folder_error: Option<FolderNameError>,
@@ -159,6 +160,7 @@ impl Default for App {
         Self {
             files: Vec::new(),
             language: Language::load(),
+            quality: load_quality(),
             output_base: None,
             folder_name: "web-ready".to_owned(),
             folder_error: None,
@@ -195,6 +197,8 @@ enum Message {
     Browse,
     ChooseOutput,
     FolderNameChanged(String),
+    QualityChanged(u8),
+    ResetQuality,
     SetLanguage(Language),
     Start,
     FileProcessed(usize, Result<ProcessedImage, ProcessError>),
@@ -315,6 +319,8 @@ impl App {
         self.last_output_dir = Some(output_dir);
         self.notice = None;
 
+        let quality = self.quality;
+
         for file in &mut self.files {
             file.status = FileStatus::Working;
         }
@@ -328,7 +334,7 @@ impl App {
 
             jobs.par_iter().for_each(|job| {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    process_image(&job.input, &job.output, MAX_EDGE, JPEG_QUALITY)
+                    process_image(&job.input, &job.output, MAX_EDGE, quality)
                 }))
                 .unwrap_or(Err(ProcessError::Panic));
 
@@ -425,6 +431,21 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::FolderNameChanged(name) => {
             app.folder_name = name;
             app.folder_error = None;
+            Task::none()
+        }
+        Message::QualityChanged(quality) => {
+            let quality = quality.clamp(1, 100);
+            if app.quality != quality {
+                app.quality = quality;
+                save_quality(quality);
+            }
+            Task::none()
+        }
+        Message::ResetQuality => {
+            if app.quality != JPEG_QUALITY {
+                app.quality = JPEG_QUALITY;
+                save_quality(JPEG_QUALITY);
+            }
             Task::none()
         }
         Message::SetLanguage(language) => {
@@ -799,11 +820,12 @@ fn file_row(language: Language, spinner_frame: usize, file: &PhotoFile) -> Eleme
         FileStatus::Working => (language.working().to_owned(), WARNING),
         FileStatus::Done(processed) => (
             format!(
-                "{} × {} → {} × {} · {}",
+                "{} × {} → {} × {} · {} → {}",
                 processed.source_width,
                 processed.source_height,
                 processed.width,
                 processed.height,
+                format_bytes(processed.source_bytes),
                 format_bytes(processed.output_bytes)
             ),
             SUCCESS,
@@ -962,6 +984,27 @@ fn controls(app: &App) -> Element<'_, Message> {
     .align_y(Alignment::Center)
     .width(Length::Fill);
 
+    let quality_row = row![
+        icon("sliders", 12.0, MUTED),
+        text(language.quality()).size(11).color(MUTED),
+        slider(1..=100, app.quality, Message::QualityChanged)
+            .step(1)
+            .width(Length::Fill)
+            .style(quality_slider_style),
+        text(app.quality.to_string())
+            .size(12)
+            .color(TEXT)
+            .width(Length::Fixed(26.0)),
+        icon_button(
+            "arrow-rotate-left",
+            language.reset_quality(),
+            Message::ResetQuality,
+        ),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center)
+    .width(Length::Fill);
+
     let mut form = column![
         row![
             column![
@@ -984,6 +1027,7 @@ fn controls(app: &App) -> Element<'_, Message> {
         .spacing(12)
         .align_y(Alignment::Center)
         .width(Length::Fill),
+        quality_row,
         folder_row,
     ]
     .spacing(12)
@@ -1087,6 +1131,28 @@ fn progress_bar_style(_theme: &Theme) -> progress_bar::Style {
         background: SURFACE_ALT.into(),
         bar: ACCENT.into(),
         border: border::rounded(3),
+    }
+}
+
+fn quality_slider_style(_theme: &Theme, status: slider::Status) -> slider::Style {
+    let handle_color = match status {
+        slider::Status::Active => ACCENT,
+        slider::Status::Hovered => ACCENT_HOVER,
+        slider::Status::Dragged => ACCENT_PRESSED,
+    };
+
+    slider::Style {
+        rail: slider::Rail {
+            backgrounds: (ACCENT.into(), SURFACE_ALT.into()),
+            width: 4.0,
+            border: border::rounded(2),
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle { radius: 6.0 },
+            background: handle_color.into(),
+            border_width: 2.0,
+            border_color: BACKGROUND,
+        },
     }
 }
 
