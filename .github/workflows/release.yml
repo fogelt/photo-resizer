@@ -59,6 +59,11 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
+          # Re-sign the binary ad-hoc after the build. The packager's build
+          # command is a no-op here, so the signed binary is what gets copied
+          # into the app bundle.
+          cargo build --release --locked
+          codesign --force --sign - target/release/photo-resizer
           for attempt in 1 2 3; do
             echo "Packaging attempt $attempt..."
             if cargo packager --release --formats "${{ matrix.formats }}" --out-dir dist; then
@@ -78,6 +83,21 @@ jobs:
           # linuxdeploy is itself an AppImage; run it without FUSE on runners.
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: cargo packager --release --formats ${{ matrix.formats }} --out-dir dist
+
+      - name: Verify macOS executable signature
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          # A stripped binary can keep a stale ad-hoc signature, which macOS
+          # reports as a damaged app. Fail the release if that ever happens.
+          DMG=$(ls dist/*.dmg | head -n 1)
+          MOUNT=/tmp/photo-resizer-dmg
+          mkdir -p "$MOUNT"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT"
+          trap 'hdiutil detach "$MOUNT" -force || true' EXIT
+          APP=$(find "$MOUNT" -maxdepth 1 -name "*.app" | head -n 1)
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Contents/Info.plist")
+          codesign --verify --strict --verbose=2 "$APP/Contents/MacOS/$EXEC"
 
       - uses: actions/upload-artifact@v4
         with:

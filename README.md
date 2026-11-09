@@ -9,8 +9,13 @@ Grab the latest installer for your platform from the
 [Releases page](https://github.com/fogelt/photo-resizer/releases):
 
 - **Windows** — `.exe` installer
-- **macOS** — `.dmg` (drag the app into Applications)
+- **macOS** — `.dmg`: choose **aarch64** for Apple Silicon or **x64** for Intel
+  (drag the app into Applications)
 - **Linux** — `.deb` package or `.AppImage`
+
+On macOS, the app is not notarized. The first time you open it, macOS may
+block it: open **System Settings → Privacy & Security** and click **Open
+Anyway** next to Photo Resizer.
 
 ## Use
 
